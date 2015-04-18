@@ -11,6 +11,7 @@ exports.OceanManager = function OceanManager(io, ioAdmin) {
     this.ioAdmin = ioAdmin;
     // simulations currently tracked
     this.trackedSimulations = {};
+    this.trackedAbandonParticipants = {};
 
     this.createOcean = function (mwId, cb) {
         Microworld.findOne({_id: mwId}, function onFound(err, mw) {
@@ -26,11 +27,44 @@ exports.OceanManager = function OceanManager(io, ioAdmin) {
 
     this.deleteOcean = function (oId) {
         delete this.oceans[oId];
-        delete this.trackedSimulations[oId];
         return;
     };
 
-    this.assignFisherToOcean = function (mwId, pId, cb) {
+    this.safeAddFisher = function (mwId, oId, pId, cb, socketId) {
+        // A function to ensure that fishers' (including bots)
+        // pIds are unique. Used in assignFisherToOcean
+
+        Microworld.findOne({_id: mwId}, function onFound(err, mw) {
+            for (var i = 0; i < mw.usedPIDs.length; i++) {
+                if (mw.usedPIDs[i] === pId) {
+                    // if the pId has already been used for this
+                    // microworld by another user
+                    io.sockets.in(socketId).emit('conflict pid', pId);
+                    return;
+                }
+            }
+           
+            var bots = mw.params.bots; 
+            for (var i = 0; i < bots.length; i++) {
+                if(bots[i].name === pId) {
+                    // if the pId has already been used for bots' name
+                    io.sockets.in(socketId).emit('conflict pid', pId);
+                    return;
+                }
+            }
+
+            // if the pId cannot be found (including bots), then do the following
+            this.oceans[oId].addFisher(pId);
+            
+            // update list of used participant IDs for this microworld
+            Microworld.update({_id : mwId}, { $push : { usedPIDs : pId } }, function(err) {
+                // TODO: handle error
+            });
+            return cb(oId);
+        }.bind(this));
+    }
+
+    this.assignFisherToOcean = function (mwId, pId, cb, socketId) {
         var oKeys = Object.keys(this.oceans);
         var oId = null;
 
@@ -38,15 +72,13 @@ exports.OceanManager = function OceanManager(io, ioAdmin) {
             oId = oKeys[i];
             if (this.oceans[oId].microworld._id.toString() === mwId &&
                     this.oceans[oId].hasRoom()) {
-                this.oceans[oId].addFisher(pId);
-                return cb(oId);
+                return this.safeAddFisher(mwId, oId, pId, cb, socketId);
             }
         }
 
         this.createOcean(mwId, function onCreated(err, oId) {
             // TODO - handle errors
-            this.oceans[oId].addFisher(pId);
-            return cb(oId);
+            return this.safeAddFisher(mwId, oId, pId, cb, socketId);
         }.bind(this));
     };
 
